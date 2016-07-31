@@ -47,12 +47,15 @@ def load_kowalski08():
 
     data = pivot_table(data, 'band', ['{}mag', 'e_{}mag'],
                        ['B', 'V', 'R', 'I'])
+
     data = data[data['mag'] != 0.]  # eliminate missing values
 
     # Join telescope and band into one column
     data['band'] = np.char.add(np.char.replace(data['Tel'], ' ', '_'),
                                np.char.add('_', data['band']))
     del data['Tel']
+
+    data['e_mag'] /= 1e3  # convert from mmag to mag
 
     # Split up table into one table per SN and add metadata.
     sne = OrderedDict()
@@ -292,10 +295,13 @@ def load_csp():
             ans = '9844'
         else:
             ans = '3009'
-            return 'cspv' + ans
-        
-    data['filter'] = [_which_V(jd_to_mjd(t)) if 'v' in b else b \
-                          for (b, t) in zip(data['filter'], data['JD'])]
+        return 'cspv' + ans
+    
+    data['JD'] += 2453000
+    data['band'] = [_which_V(jd_to_mjd(t)) if 'v' in b else b \
+                        for (b, t) in zip(data['filter'], data['JD'])]
+    
+    del data['filter']
 
     sne = OrderedDict()
     magsys = sncosmo.get_magsystem('csp')
@@ -308,10 +314,9 @@ def load_csp():
                               ('ra', ra[i]),
                               ('dec', dec[i])])
         zpsys = len(sndata) * ['csp']
-        zp = [magsys.offsets[magsys.bands.index(sncosmo.get_bandpass(b))] \
-                  for b in data['filter']]
+        zp = [2.5 * np.log10(magsys.zpbandflux(b)) for b in sndata['band']]
         flux, fluxerr = mag_to_flux(sndata['mag'], sndata['e_mag'], zp)
-        sne[name] = Table([jd_to_mjd(sndata['JD']), sndata['filter'],
+        sne[name] = Table([jd_to_mjd(sndata['JD']), sndata['band'],
                            flux, fluxerr, zp, zpsys],
                           names=('time', 'band', 'flux', 'fluxerr', 'zp',
                                  'zpsys'),
