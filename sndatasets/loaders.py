@@ -54,9 +54,7 @@ def load_kowalski08():
     data['band'] = np.char.add(np.char.replace(data['Tel'], ' ', '_'),
                                np.char.add('_', data['band']))
     del data['Tel']
-
-    data['e_mag'] /= 1e3  # convert from mmag to mag
-
+    
     # Split up table into one table per SN and add metadata.
     sne = OrderedDict()
     for i in range(len(meta)):
@@ -286,6 +284,12 @@ def load_csp():
                           for (b, t) in bandtel]
     data['filter'] = [f.lower() for f in data['filter']]
     del data['Tel'], data['band'], data['---'], data['f_JD']
+
+    # convert from mmag to mag
+    data['magerr'] = data['e_mag'].astype(float) / 1e3
+    del data['e_mag']
+    data['e_mag'] = data['magerr']
+    del data['magerr']    
 
     def _which_V(mjd):
         # return the CSP V band that was in use on mjd.
