@@ -9,8 +9,9 @@ import os
 from os.path import join
 
 import numpy as np
+import sncosmo
 from astropy.io import ascii
-from astropy.table import Table
+from astropy.table import Table, join as tabjoin
 
 from .dlutils import download_file, download_sn_positions
 from .utils import (hms_to_deg, sdms_to_deg, pivot_table,
@@ -20,7 +21,8 @@ from .utils import (hms_to_deg, sdms_to_deg, pivot_table,
 CDS_PREFIX = "http://cdsarc.u-strasbg.fr/vizier/ftp/cats/"
 
 
-__all__ = ["load_kowalski08", "load_hamuy96", "load_krisciunas"]
+__all__ = ["load_kowalski08", "load_hamuy96", "load_krisciunas",
+           "load_csp"]
 
 
 def load_kowalski08():
@@ -140,8 +142,7 @@ def load_hamuy96():
                               ('ra', sxhr_to_deg(meta[name][0])),
                               ('dec', sx_to_deg(meta[name][1]))])
 
-        sndata = data[data['SN'] == name]
-
+        sndata = data[data['SN'] == name]            
         time = jd_to_mjd(sndata['HJD'])
         band = np.char.add('bessell', np.char.lower(sndata['band']))
         zp = 29. * np.ones(len(sndata), dtype=np.float64)
@@ -248,3 +249,72 @@ def load_krisciunas():
                           meta=snmeta)
 
     return sne
+
+def load_csp():
+    """CSP DR2 Photometry from Stritzinger et al 2011
+    http://adsabs.harvard.edu/abs/2011AJ....142..156S """
+    
+    prefix = CDS_PREFIX + 'J/AJ/142/156/'
+    readme = download_file(prefix + 'ReadMe', 'csp')
+    table1 = download_file(prefix + 'table1.dat', 'csp')  # general
+    table4 = download_file(prefix + 'table4.dat', 'csp')  # optical
+    table5 = download_file(prefix + 'table5.dat', 'csp')  # ir
+    
+    meta = ascii.read(table1, format='cds', readme=readme)
+    ra = hms_to_deg(meta['RAh'], meta['RAm'], meta['RAs'])
+    dec = sdms_to_deg(meta['DE-'], meta['DEd'], meta['DEm'], meta['DEs'])
+    
+    opt_data = ascii.read(table4, format='cds', readme=readme)
+    ir_data = ascii.read(table5, format='cds', readme=readme)
+    data = tabjoin(opt_data, ir_data, join_type='outer')
+
+    data = data.filled(0.)  # copying this from kyle
+
+    data = pivot_table(data, 'band', ['{}mag', 'e_{}mag'],
+                       ['u', 'g', 'r', 'i', 'B', 'V', 
+                        'Y', 'J', 'H', 'K'])
+
+    data = data[data['mag'] != 0]  # eliminate missing values
+
+    bandtel = zip(data['band'], data['Tel'])
+    ir = ['Y', 'J', 'H']
+    
+    data['filter'] = ['csp' + b if b not in ir  else 'csp' + b + t[0] \
+                          for (b, t) in bandtel]
+    data['filter'] = [f.lower() for f in data['filter']]
+    del data['Tel'], data['band'], data['---'], data['f_JD']
+
+    def _which_V(mjd):
+        # return the CSP V band that was in use on mjd.
+        if mjd < 53748:
+            ans = '3014'
+        elif mjd > 53761:
+            ans = '9844'
+        else:
+            ans = '3009'
+            return 'cspv' + ans
+        
+    data['filter'] = [_which_V(jd_to_mjd(t)) if 'v' in b else b \
+                          for (b, t) in zip(data['filter'], data['JD'])]
+
+    sne = OrderedDict()
+    magsys = sncosmo.get_magsystem('csp')
+    for i in range(len(meta)):
+        name = meta['SN'][i]
+        sndata = data[data['SN'] == name]
+        snmeta = OrderedDict([('name', name),
+                              ('dataset', 'csp'),
+                              ('z_helio', meta['z'][i]),
+                              ('ra', ra[i]),
+                              ('dec', dec[i])])
+        zpsys = len(sndata) * ['csp']
+        zp = [magsys.offsets[magsys.bands.index(sncosmo.get_bandpass(b))] \
+                  for b in data['filter']]
+        flux, fluxerr = mag_to_flux(sndata['mag'], sndata['e_mag'], zp)
+        sne[name] = Table([jd_to_mjd(sndata['JD']), sndata['filter'],
+                           flux, fluxerr, zp, zpsys],
+                          names=('time', 'band', 'flux', 'fluxerr', 'zp',
+                                 'zpsys'),
+                          meta=snmeta)
+    return sne
+    
