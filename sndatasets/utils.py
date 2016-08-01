@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+from numpy import float64
 from astropy.table import Table
 
 
