@@ -8,8 +8,6 @@ from collections import OrderedDict
 import os
 from os.path import join
 
-import glob
-
 import numpy as np
 import sncosmo
 from astropy.io import ascii
