@@ -344,7 +344,6 @@ def load_csp():
 
                                 if not cond.any():
                                     filt += 's'  # the SN is not in the vizier catalog
-                                    print(1)
                                 elif tel[cond][0]['Tel'].lower().startswith('d'):
                                     filt += 'd'
                                 else:
