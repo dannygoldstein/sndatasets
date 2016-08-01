@@ -8,14 +8,19 @@ from collections import OrderedDict
 import os
 from os.path import join
 
+import glob
+
 import numpy as np
 import sncosmo
 from astropy.io import ascii
-from astropy.table import Table, join as tabjoin
+from astropy.table import Table, vstack
+from astropy.coordinates import SkyCoord
+import tarfile
 
 from .dlutils import download_file, download_sn_positions
 from .utils import (hms_to_deg, sdms_to_deg, pivot_table,
-                    mag_to_flux, jd_to_mjd, sxhr_to_deg, sx_to_deg)
+                    mag_to_flux, jd_to_mjd, sxhr_to_deg, sx_to_deg,
+                    cmb_to_helio)
 
 
 CDS_PREFIX = "http://cdsarc.u-strasbg.fr/vizier/ftp/cats/"
@@ -251,79 +256,117 @@ def load_krisciunas():
 
     return sne
 
+
 def load_csp():
-    """CSP DR2 Photometry from Stritzinger et al 2011
-    http://adsabs.harvard.edu/abs/2011AJ....142..156S """
+    """CSP DR1 + DR2 Photometry from Contreras et al 2010 and Stritzinger
+    et al 2011
     
-    prefix = CDS_PREFIX + 'J/AJ/142/156/'
-    readme = download_file(prefix + 'ReadMe', 'csp')
-    table1 = download_file(prefix + 'table1.dat', 'csp')  # general
-    table4 = download_file(prefix + 'table4.dat', 'csp')  # optical
-    table5 = download_file(prefix + 'table5.dat', 'csp')  # ir
+    http://adsabs.harvard.edu/abs/2010AJ....139..519C
+    http://adsabs.harvard.edu/abs/2011AJ....142..156S
+    """
     
-    meta = ascii.read(table1, format='cds', readme=readme)
-    ra = hms_to_deg(meta['RAh'], meta['RAm'], meta['RAs'])
-    dec = sdms_to_deg(meta['DE-'], meta['DEd'], meta['DEm'], meta['DEs'])
-    
-    opt_data = ascii.read(table4, format='cds', readme=readme)
-    ir_data = ascii.read(table5, format='cds', readme=readme)
-    data = tabjoin(opt_data, ir_data, join_type='outer')
+    dataurl = 'http://csp.obs.carnegiescience.edu/data/CSP_Photometry_DR2.tar.gz'
+    tarball = download_file(dataurl, 'csp')
+    tar = tarfile.open(tarball)
+    path = '/'.join(tarball.split('/')[:-1])
+    tar.extractall(path=path)
+    names = filter(lambda fn: fn.endswith('dat') and not '._' in fn,
+                   tar.getnames())
+    names = map(lambda f: join(path, f), names)
+    tar.close()
+     
+    # Keep track of the telescopes used for IR observations. 
+    ir1 = download_file(CDS_PREFIX + 'J/AJ/139/519/table5.dat', 'csp_ir1')
+    readme1 = download_file(CDS_PREFIX + 'J/AJ/139/519/ReadMe', 'csp_ir1')
+    ir2 = download_file(CDS_PREFIX + 'J/AJ/142/156/table5.dat', 'csp_ir2')
+    readme2 = download_file(CDS_PREFIX + 'J/AJ/142/156/ReadMe', 'csp_ir2')
+    tel1 = ascii.read(ir1, format='cds', readme=readme1)[['SN', 'JD', 'Tel']]
+    tel2 = ascii.read(ir2, format='cds', readme=readme2)[['SN', 'JD', 'Tel']]
+    tel2['JD'] += 2453000.  # JD column has an offset of 2453000
+    tel = vstack((tel1, tel2))
+    magsys = sncosmo.get_magsystem('csp')    
 
-    data = data.filled(0.)  # copying this from kyle
+    def _read_csp(f, **kwargs):
 
-    data = pivot_table(data, 'band', ['{}mag', 'e_{}mag'],
-                       ['u', 'g', 'r', 'i', 'B', 'V', 
-                        'Y', 'J', 'H', 'K'])
+        meta = OrderedDict()
+        data = []
+        colnames = ['mjd', 'filter', 'flux', 'fluxerr', 'zp', 'magsys']
+        readingdata = False
 
-    data = data[data['mag'] != 0]  # eliminate missing values
+        def _which_V(mjd):
+            # return the CSP V band that was in use on mjd.
+            if mjd < 53748:
+                ans = '3014'
+            elif mjd > 53761:
+                ans = '9844'
+            else:
+                ans = '3009'
+            return 'cspv' + ans
 
-    bandtel = zip(data['band'], data['Tel'])
-    ir = ['Y', 'J', 'H']
-    
-    data['filter'] = ['csp' + b if b not in ir  else 'csp' + b + t[0] \
-                          for (b, t) in bandtel]
-    data['filter'] = [f.lower() for f in data['filter']]
-    del data['Tel'], data['band'], data['---'], data['f_JD']
+        for j, line in enumerate(f):
+            if not readingdata:
+                if j == 4:
+                    filts = [n.lower() for n in line[1:].strip().split()[1:] if n != '+/-']
+                    readingdata = True
 
-    # convert from mmag to mag
-    data['magerr'] = data['e_mag'].astype(float) / 1e3
-    del data['e_mag']
-    data['e_mag'] = data['magerr']
-    del data['magerr']    
+                if j == 2:
+                    sline = line[1:].split()
+                    meta['z_cmb'] = float(sline[2])
+                    ra  = (sline[5].replace(':', '%s') + '%s') % ('d','m','s')
+                    dec = (sline[8].replace(':', '%s') + '%s') % ('d','m','s')
 
-    def _which_V(mjd):
-        # return the CSP V band that was in use on mjd.
-        if mjd < 53748:
-            ans = '3014'
-        elif mjd > 53761:
-            ans = '9844'
-        else:
-            ans = '3009'
-        return 'cspv' + ans
-    
-    data['JD'] += 2453000
-    data['band'] = [_which_V(jd_to_mjd(t)) if 'v' in b else b \
-                        for (b, t) in zip(data['filter'], data['JD'])]
-    
-    del data['filter']
+                    # convert from dms to degrees
+                    coord = SkyCoord(ra, dec)
+
+                    meta['ra']  = coord.ra.value
+                    meta['dec'] = coord.dec.value
+                    meta['z_helio'] = cmb_to_helio(meta['z_cmb'],
+                                                   meta['ra'],
+                                                   meta['dec'])
+                    
+                if j == 0:
+                    meta['name'] = line.split()[-1]
+
+            else:
+                d = line.split()
+                mjd = float(d[0])
+                for i in range(1, len(d), 2):
+                    if d[i] != '99.900':
+                        if filts[i / 2] == 'v':
+                            # figure out which V
+                            filt = _which_V(mjd)
+                        else:
+                            filt = 'csp' + filts[i / 2]
+                        for b in ['y', 'j', 'h']:
+                            if b in filt:
+
+                                cond1 = tel['SN'] == meta['name'][2:]
+                                cond2 = np.isclose(jd_to_mjd(tel['JD']),mjd)
+                                cond = np.logical_and(cond1, cond2)
+
+                                if not cond.any():
+                                    filt += 's'  # the SN is not in the vizier catalog
+                                    print(1)
+                                elif tel[cond][0]['Tel'].lower().startswith('d'):
+                                    filt += 'd'
+                                else:
+                                    filt += 's'
+                                break
+
+                        mag = float(d[i])
+                        magerr = float(d[i + 1])
+                        zpsys = 'csp'
+                        zp = 2.5 * np.log10(magsys.zpbandflux(filt))
+                        flux, fluxerr = mag_to_flux(mag, magerr, zp)
+                        data.append((mjd, filt, flux, fluxerr, zp, zpsys))
+
+        data = dict(zip(colnames, zip(*data)))
+        return Table(data, meta=meta)
 
     sne = OrderedDict()
-    magsys = sncosmo.get_magsystem('csp')
-    for i in range(len(meta)):
-        name = meta['SN'][i]
-        sndata = data[data['SN'] == name]
-        snmeta = OrderedDict([('name', name),
-                              ('dataset', 'csp'),
-                              ('z_helio', meta['z'][i]),
-                              ('ra', ra[i]),
-                              ('dec', dec[i])])
-        zpsys = len(sndata) * ['csp']
-        zp = [2.5 * np.log10(magsys.zpbandflux(b)) for b in sndata['band']]
-        flux, fluxerr = mag_to_flux(sndata['mag'], sndata['e_mag'], zp)
-        sne[name] = Table([jd_to_mjd(sndata['JD']), sndata['band'],
-                           flux, fluxerr, zp, zpsys],
-                          names=('time', 'band', 'flux', 'fluxerr', 'zp',
-                                 'zpsys'),
-                          meta=snmeta)
+    for name in names:
+        with open(name, 'r') as f:
+            snname = name.split('/')[-1][2:].split('opt')[0]
+            sne[snname] = _read_csp(f)
     return sne
     
