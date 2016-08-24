@@ -310,7 +310,7 @@ def load_csp():
                 if j == 2:
                     sline = line[1:].split()
                     meta['z_cmb'] = float(sline[2])
-                    ra  = (sline[5].replace(':', '%s') + '%s') % ('d','m','s')
+                    ra  = (sline[5].replace(':', '%s') + '%s') % ('h','m','s')
                     dec = (sline[8].replace(':', '%s') + '%s') % ('d','m','s')
 
                     # convert from dms to degrees
